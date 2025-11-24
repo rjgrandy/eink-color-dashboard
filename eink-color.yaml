@@ -1,0 +1,234 @@
+esphome:
+  name: eink-color
+  friendly_name: eink_color
+  platformio_options:
+    build_flags: "-DBOARD_HAS_PSRAM"
+    board_build.arduino.memory_type: qio_opi
+  on_boot:
+    priority: -10
+    then:
+      - component.update: dashboard_image
+      - component.update: image_2
+      - component.update: image_3
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret einkcolor_api_encrypt
+
+ota:
+  - platform: esphome
+    password: !secret einkcolor_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Eink-Color Fallback Hotspot"
+    password: !secret einkcolor_ap_password
+
+captive_portal:
+
+# Global variable to track which image to show
+globals:
+  - id: current_image
+    type: int
+    initial_value: '2'
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/lublak/esphome
+      ref: dev
+    components: [ waveshare_epaper ]
+  - source: github://lublak/esphome@pull/1/head
+    components: [waveshare_epaper]
+    refresh: 1h 
+
+http_request:
+  verify_ssl: false
+  timeout: 30s
+  watchdog_timeout: 45s
+
+interval:
+  - interval: 300s
+    then:
+      - logger.log: "Refreshing all 3 images..."
+      - component.update: dashboard_image
+      - component.update: image_2
+      - component.update: image_3
+
+# --- IMAGES --- #
+online_image:
+  # Image 1
+  - id: dashboard_image
+    format: PNG
+    type: RGB
+    buffer_size: 30000
+    url: http://YOUR_RENDERER_IP:5500/eink-image?dither=regional&source_url=http://YOUR_HA_IP:10000/lovelace-main/einkpanelcolor?viewport=800x480
+    update_interval: never
+    on_download_finished:
+      - if:
+          condition:
+            lambda: 'return id(current_image) == 1;'
+          then:
+            - delay: 100ms
+            - component.update: main_display
+
+  # Image 2
+  - id: image_2
+    format: PNG
+    type: RGB
+    buffer_size: 30000
+    url: http://YOUR_RENDERER_IP:5500/eink-image?dither=true&source_url=http://YOUR_HA_IP:10000/lovelace-main/immichss?viewport=800x480
+    update_interval: never
+    on_download_finished:
+      - if:
+          condition:
+            lambda: 'return id(current_image) == 2;'
+          then:
+            - delay: 100ms
+            - component.update: main_display
+
+  # Image 3
+  - id: image_3
+    format: PNG
+    type: RGB
+    buffer_size: 30000
+    url: http://YOUR_RENDERER_IP:5500/eink-image?dither=true&source_url=http://YOUR_HA_IP:10000/lovelace-main/system?viewport=800x480
+    update_interval: never
+    on_download_finished:
+      - if:
+          condition:
+            lambda: 'return id(current_image) == 3;'
+          then:
+            - delay: 100ms
+            - component.update: main_display
+
+# LED configuration
+output:
+  - platform: gpio
+    pin: GPIO6
+    id: led_output
+    inverted: true
+
+light:
+  - platform: binary
+    name: "Onboard LED"
+    output: led_output
+    id: onboard_led
+
+# BUTTONS just switch display, no downloading
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO3         # Green button
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_1
+    name: "Button 1"
+    on_press:
+      then:
+        - light.turn_on: onboard_led
+        - globals.set:
+            id: current_image
+            value: '1'
+        - component.update: main_display
+        - delay: 500ms
+        - light.turn_off: onboard_led
+        
+  - platform: gpio
+    pin:
+      number: GPIO4         # Right white button
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_2
+    name: "Button 2"
+    on_press:
+      then:
+        - light.turn_on: onboard_led
+        - globals.set:
+            id: current_image
+            value: '2'
+        - component.update: main_display
+        - delay: 500ms
+        - light.turn_off: onboard_led
+        
+  - platform: gpio
+    pin:
+      number: GPIO5         # Left white button
+      mode: INPUT_PULLUP
+      inverted: true
+    id: button_3
+    name: "Button 3"
+    on_press:
+      then:
+        - light.turn_on: onboard_led
+        - globals.set:
+            id: current_image
+            value: '3'
+        - component.update: main_display
+        - delay: 500ms
+        - light.turn_off: onboard_led
+
+text_sensor:
+  - platform: homeassistant
+    id: media_player_title
+    entity_id: media_player.amped_mb
+    attribute: media_title
+    on_value:
+      - logger.log: "Media title changed! Downloading new image..."
+      - component.update: dashboard_image
+
+  - platform: homeassistant
+    id: refresh_button
+    entity_id: input_button.eink_panel_update
+    on_value:
+      - logger.log: "Button pressed! Downloading new image..."
+      - component.update: dashboard_image
+
+# define SPI interface
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+display:
+  - platform: waveshare_epaper
+    id: main_display
+    model: 7.30in-e
+    cs_pin: GPIO10
+    dc_pin: GPIO11
+    reset_pin:
+      number: GPIO12
+      inverted: false
+    busy_pin:
+      number: GPIO13
+      inverted: true
+    update_interval: 1800s
+    reset_duration: 200ms
+    lambda: |-
+
+      ESP_LOGD("display", "Attempting to draw image number: %d", id(current_image));
+
+      // Check the global variable to decide which image to draw
+      if (id(current_image) == 1) {
+        it.image(0, 0, id(dashboard_image));
+      } else if (id(current_image) == 2) {
+        it.image(0, 0, id(image_2));
+      } else if (id(current_image) == 3) {
+        it.image(0, 0, id(image_3));
+      }
